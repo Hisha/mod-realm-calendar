@@ -108,3 +108,12 @@ Once the diagnostic output matches the in-game calendar:
 ## License
 
 GPL-2.0-or-later, matching AzerothCore's licensing model.
+
+
+## Diagnostic commands
+
+- `.realmcalendar inspect` — raw calendar-facing `GameEventMgr` rows with canonical event IDs taken from the event-map index.
+- `.realmcalendar holidays` — logical holiday definitions from the in-memory `Holidays.dbc` store, including stages, packed dates, filter type, looping flag, and texture.
+- `.realmcalendar upcoming [days]` — logical holiday occurrences calculated from the holiday calendar definition rather than every supporting `game_event` row.
+
+The current development target is to make `upcoming` agree with the public events shown by the WoW 3.3.5a calendar before adding JSON export.
