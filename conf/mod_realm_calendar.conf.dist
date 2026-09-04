@@ -1,0 +1,26 @@
+#
+#    mod-realm-calendar
+#    AzerothCore realm/public calendar event exporter
+#
+
+###################################################################################################
+# REALM CALENDAR
+#
+#    RealmCalendar.Enable
+#        Description: Enables mod-realm-calendar diagnostics and future calendar export features.
+#        Default:     1
+#
+#    RealmCalendar.DefaultHorizonDays
+#        Description: Number of days shown by `.realmcalendar upcoming` when no value is supplied.
+#        Default:     30
+#
+#    RealmCalendar.MaxHorizonDays
+#        Description: Maximum value accepted by `.realmcalendar upcoming <days>`.
+#                     730 allows testing well beyond the in-game rolling calendar horizon.
+#        Default:     730
+#
+###################################################################################################
+
+RealmCalendar.Enable = 1
+RealmCalendar.DefaultHorizonDays = 30
+RealmCalendar.MaxHorizonDays = 730
