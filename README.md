@@ -114,6 +114,7 @@ GPL-2.0-or-later, matching AzerothCore's licensing model.
 
 - `.realmcalendar inspect` — raw calendar-facing `GameEventMgr` rows with canonical event IDs taken from the event-map index.
 - `.realmcalendar holidays` — logical holiday definitions from the in-memory `Holidays.dbc` store, including stages, packed dates, filter type, looping flag, and texture.
-- `.realmcalendar upcoming [days]` — logical holiday occurrences calculated from the holiday calendar definition rather than every supporting `game_event` row.
+- `.realmcalendar upcoming [days]` — logical public occurrences; seasonal holidays use Holidays.dbc while weekly fishing contests use the GameEventMgr recurrence.
+- `.realmcalendar month <year> <month>` — compact month view for direct comparison with the in-game calendar. Call to Arms / CalendarFilterType 2 events are excluded from the default public view.
 
 The current development target is to make `upcoming` agree with the public events shown by the WoW 3.3.5a calendar before adding JSON export.

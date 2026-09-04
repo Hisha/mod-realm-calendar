@@ -337,16 +337,67 @@ void AppendHolidayOccurrences(HolidaySource const& source, time_t windowStart, t
     }
 }
 
-std::vector<CalendarOccurrence> BuildOccurrences(uint32 horizonDays)
+bool IsDefaultPublicHoliday(HolidaysEntry const& holiday)
+{
+    // CalendarFilterType 2 is used by Call to Arms / battleground bonus events.
+    // Keep those available to diagnostics, but omit them from the default public calendar.
+    return holiday.CalendarFilterType != 2;
+}
+
+void AppendGameEventRecurrences(HolidaySource const& source, time_t windowStart, time_t windowEnd,
+                                std::vector<CalendarOccurrence>& output)
+{
+    GameEventData const& eventData = *source.Event;
+    if (eventData.Start <= 0 || eventData.Occurence == 0 || eventData.Length == 0)
+        return;
+
+    time_t const period = static_cast<time_t>(eventData.Occurence) * MINUTE;
+    time_t const duration = static_cast<time_t>(eventData.Length) * MINUTE;
+    if (period <= 0 || duration <= 0)
+        return;
+
+    int64 occurrenceIndex = 0;
+    if (windowStart > eventData.Start)
+        occurrenceIndex = static_cast<int64>((windowStart - eventData.Start) / period);
+    if (occurrenceIndex > 0)
+        --occurrenceIndex;
+
+    std::string const name = CleanDisplayName(eventData.Description);
+    for (;; ++occurrenceIndex)
+    {
+        time_t const start = eventData.Start + static_cast<time_t>(occurrenceIndex) * period;
+        if (start > windowEnd)
+            break;
+        if (start + duration < windowStart)
+            continue;
+        AppendOccurrence(output, source, name, start, start + duration, windowStart, windowEnd);
+    }
+}
+
+bool UsesWeeklyGameEventSchedule(HolidaysEntry const& holiday)
+{
+    // The fishing contests use Holidays.dbc for calendar identity but their real weekly
+    // cadence lives in GameEventMgr. Their DBC row has CalendarFilterType 0 and a
+    // non-looping placeholder/yearly packed date rather than the weekly recurrence.
+    return holiday.CalendarFilterType == 0 && !holiday.Looping;
+}
+
+std::vector<CalendarOccurrence> BuildOccurrences(time_t windowStart, time_t windowEnd, bool includeFiltered = false)
 {
     std::vector<CalendarOccurrence> result;
-    time_t const now = std::time(nullptr);
-    time_t const windowEnd = now + static_cast<time_t>(horizonDays) * DAY;
 
     for (auto const& [holidayId, source] : BuildHolidaySources())
     {
-        (void)holidayId;
-        AppendHolidayOccurrences(source, now, windowEnd, result);
+        HolidaysEntry const* holiday = sHolidaysStore.LookupEntry(holidayId);
+        if (!holiday)
+            continue;
+        if (!includeFiltered && !IsDefaultPublicHoliday(*holiday))
+            continue;
+
+        if (UsesWeeklyGameEventSchedule(*holiday))
+            AppendGameEventRecurrences(source, windowStart, windowEnd, result);
+        else
+            AppendHolidayOccurrences(source, windowStart, windowEnd, result);
     }
 
     std::sort(result.begin(), result.end(), [](CalendarOccurrence const& left, CalendarOccurrence const& right)
@@ -359,6 +410,38 @@ std::vector<CalendarOccurrence> BuildOccurrences(uint32 horizonDays)
     });
 
     return result;
+}
+
+std::vector<CalendarOccurrence> BuildOccurrences(uint32 horizonDays)
+{
+    time_t const now = std::time(nullptr);
+    return BuildOccurrences(now, now + static_cast<time_t>(horizonDays) * DAY);
+}
+
+time_t MakeLocalDate(int year, int month, int day)
+{
+    std::tm value{};
+    value.tm_year = year - 1900;
+    value.tm_mon = month - 1;
+    value.tm_mday = day;
+    value.tm_hour = 0;
+    value.tm_min = 0;
+    value.tm_sec = 0;
+    value.tm_isdst = -1;
+    return std::mktime(&value);
+}
+
+std::string FormatMonthDayTime(time_t value)
+{
+    std::tm tmValue{};
+#if defined(_WIN32)
+    localtime_s(&tmValue, &value);
+#else
+    localtime_r(&value, &tmValue);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tmValue, "%b %d %H:%M");
+    return out.str();
 }
 }
 
@@ -382,6 +465,7 @@ public:
     {
         static ChatCommandTable realmCalendarCommandTable =
         {
+            { "month",    HandleMonthCommand,    SEC_ADMINISTRATOR, Console::Yes },
             { "upcoming", HandleUpcomingCommand, SEC_ADMINISTRATOR, Console::Yes },
             { "holidays", HandleHolidaysCommand, SEC_ADMINISTRATOR, Console::Yes },
             { "inspect",  HandleInspectCommand,  SEC_ADMINISTRATOR, Console::Yes }
@@ -396,6 +480,56 @@ public:
     }
 
 private:
+    static bool HandleMonthCommand(ChatHandler* handler, uint32 year, uint32 month)
+    {
+        if (!gRealmCalendarConfig.Enabled)
+        {
+            handler->SendSysMessage("[Realm Calendar] Module is disabled in mod_realm_calendar.conf.");
+            return true;
+        }
+
+        if (year < 2000 || year > 2100 || month < 1 || month > 12)
+        {
+            handler->SendSysMessage("[Realm Calendar] Usage: .realmcalendar month <year> <month>");
+            return true;
+        }
+
+        time_t const monthStart = MakeLocalDate(static_cast<int>(year), static_cast<int>(month), 1);
+        int nextYear = static_cast<int>(year);
+        int nextMonth = static_cast<int>(month) + 1;
+        if (nextMonth == 13)
+        {
+            nextMonth = 1;
+            ++nextYear;
+        }
+        time_t const monthEnd = MakeLocalDate(nextYear, nextMonth, 1);
+
+        std::vector<CalendarOccurrence> const occurrences = BuildOccurrences(monthStart, monthEnd - 1);
+        handler->PSendSysMessage("[Realm Calendar] Public calendar for {:04}-{:02}:", year, month);
+
+        if (occurrences.empty())
+        {
+            handler->SendSysMessage("[Realm Calendar] No public calendar occurrences found for that month.");
+            return true;
+        }
+
+        for (CalendarOccurrence const& occurrence : occurrences)
+        {
+            // End is an exclusive boundary. Display it explicitly here while diagnostics
+            // are being compared; consumers can later render midnight as 23:59 on the
+            // preceding visible day just like the WoW calendar UI.
+            handler->PSendSysMessage("{}  {} -> {}  (holiday={} event={})",
+                occurrence.Name,
+                FormatMonthDayTime(occurrence.Start),
+                FormatMonthDayTime(occurrence.End),
+                occurrence.HolidayId,
+                occurrence.EventId);
+        }
+
+        handler->PSendSysMessage("[Realm Calendar] {} public occurrence(s) found; Call to Arms events excluded.", occurrences.size());
+        return true;
+    }
+
     static bool HandleUpcomingCommand(ChatHandler* handler, Optional<uint32> horizonDaysArg)
     {
         if (!gRealmCalendarConfig.Enabled)
