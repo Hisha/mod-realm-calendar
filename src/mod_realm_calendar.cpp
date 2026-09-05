@@ -25,9 +25,12 @@ using namespace Acore::ChatCommands;
 
 namespace
 {
+constexpr char REALM_CALENDAR_VERSION[] = "1.0.0";
+
 struct RealmCalendarConfig
 {
     bool Enabled = true;
+    bool Diagnostics = false;
     std::string OutputFile = "calendar.json";
     uint32 FutureMonths = 12;
     uint32 CheckIntervalMinutes = 60;
@@ -40,6 +43,7 @@ RealmCalendarConfig gRealmCalendarConfig;
 void LoadRealmCalendarConfig()
 {
     gRealmCalendarConfig.Enabled = sConfigMgr->GetOption<bool>("RealmCalendar.Enable", true);
+    gRealmCalendarConfig.Diagnostics = sConfigMgr->GetOption<bool>("RealmCalendar.Diagnostics", false);
     gRealmCalendarConfig.OutputFile = sConfigMgr->GetOption<std::string>("RealmCalendar.OutputFile", "calendar.json");
     gRealmCalendarConfig.FutureMonths = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("RealmCalendar.FutureMonths", 12), 1, 36);
     gRealmCalendarConfig.CheckIntervalMinutes = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("RealmCalendar.CheckIntervalMinutes", 60), 5, 1440);
@@ -837,6 +841,7 @@ public:
     {
         static ChatCommandTable realmCalendarCommandTable =
         {
+            { "status",   HandleStatusCommand,   SEC_ADMINISTRATOR, Console::Yes },
             { "publish",  HandlePublishCommand,  SEC_ADMINISTRATOR, Console::Yes },
             { "month",    HandleMonthCommand,    SEC_ADMINISTRATOR, Console::Yes },
             { "upcoming", HandleUpcomingCommand, SEC_ADMINISTRATOR, Console::Yes },
@@ -853,6 +858,36 @@ public:
     }
 
 private:
+    static bool RequireDiagnostics(ChatHandler* handler)
+    {
+        if (gRealmCalendarConfig.Diagnostics)
+            return true;
+
+        handler->SendSysMessage("[Realm Calendar] Diagnostic commands are disabled. Set RealmCalendar.Diagnostics = 1 and reload the config to enable them.");
+        return false;
+    }
+
+    static bool HandleStatusCommand(ChatHandler* handler)
+    {
+        std::error_code ec;
+        std::filesystem::path const outputPath(gRealmCalendarConfig.OutputFile);
+        bool const outputExists = !gRealmCalendarConfig.OutputFile.empty() &&
+            std::filesystem::exists(outputPath, ec) && !ec;
+
+        time_t const rangeStart = StartOfCurrentMonth();
+        time_t const rangeEnd = AddLocalMonths(rangeStart, static_cast<int>(gRealmCalendarConfig.FutureMonths) + 1);
+
+        handler->PSendSysMessage("[Realm Calendar] mod-realm-calendar v{}", REALM_CALENDAR_VERSION);
+        handler->PSendSysMessage("[Realm Calendar] Enabled: {} | Diagnostics: {}",
+            gRealmCalendarConfig.Enabled ? "yes" : "no",
+            gRealmCalendarConfig.Diagnostics ? "yes" : "no");
+        handler->PSendSysMessage("[Realm Calendar] Output: '{}' ({})",
+            gRealmCalendarConfig.OutputFile, outputExists ? "present" : "missing");
+        handler->PSendSysMessage("[Realm Calendar] Rolling range: {} through {} | check every {} minute(s)",
+            FormatDate(rangeStart), FormatDate(rangeEnd - 1), gRealmCalendarConfig.CheckIntervalMinutes);
+        return true;
+    }
+
     static bool HandlePublishCommand(ChatHandler* handler)
     {
         if (!gRealmCalendarConfig.Enabled)
@@ -870,6 +905,9 @@ private:
 
     static bool HandleMonthCommand(ChatHandler* handler, uint32 year, uint32 month)
     {
+        if (!RequireDiagnostics(handler))
+            return true;
+
         if (!gRealmCalendarConfig.Enabled)
         {
             handler->SendSysMessage("[Realm Calendar] Module is disabled in mod_realm_calendar.conf.");
@@ -916,6 +954,9 @@ private:
 
     static bool HandleUpcomingCommand(ChatHandler* handler, Optional<uint32> horizonDaysArg)
     {
+        if (!RequireDiagnostics(handler))
+            return true;
+
         if (!gRealmCalendarConfig.Enabled)
         {
             handler->SendSysMessage("[Realm Calendar] Module is disabled in mod_realm_calendar.conf.");
@@ -955,6 +996,9 @@ private:
 
     static bool HandleHolidaysCommand(ChatHandler* handler)
     {
+        if (!RequireDiagnostics(handler))
+            return true;
+
         if (!gRealmCalendarConfig.Enabled)
         {
             handler->SendSysMessage("[Realm Calendar] Module is disabled in mod_realm_calendar.conf.");
@@ -1009,6 +1053,9 @@ private:
 
     static bool HandleInspectCommand(ChatHandler* handler)
     {
+        if (!RequireDiagnostics(handler))
+            return true;
+
         if (!gRealmCalendarConfig.Enabled)
         {
             handler->SendSysMessage("[Realm Calendar] Module is disabled in mod_realm_calendar.conf.");

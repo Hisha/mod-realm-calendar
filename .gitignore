@@ -2,3 +2,5 @@
 *.user
 *.swp
 *~
+calendar.json
+calendar.json.tmp

@@ -7,7 +7,7 @@
 # REALM CALENDAR
 #
 #    RealmCalendar.Enable
-#        Description: Enables automatic realm calendar publication and diagnostic commands.
+#        Description: Enables automatic realm calendar publication and production admin commands.
 #        Default:     1
 #
 #    RealmCalendar.OutputFile
@@ -24,13 +24,20 @@
 #        Default:     12
 #
 #    RealmCalendar.CheckIntervalMinutes
-#        Description: How often the module checks whether a new month has started. Publication also
-#                     occurs immediately on worldserver startup and after a config reload.
+#        Description: How often the module checks whether a new month has started or the output
+#                     file has disappeared. Publication also occurs immediately on worldserver
+#                     startup and after a config reload.
 #        Range:       5-1440
 #        Default:     60
 #
+#    RealmCalendar.Diagnostics
+#        Description: Enables development/troubleshooting commands: month, upcoming, holidays,
+#                     and inspect. Not required for normal operation.
+#        Default:     0
+#
 #    RealmCalendar.DefaultHorizonDays
-#        Description: Number of days shown by `.realmcalendar upcoming` when no value is supplied.
+#        Description: Number of days shown by `.realmcalendar upcoming` when diagnostics are
+#                     enabled and no value is supplied.
 #        Default:     30
 #
 #    RealmCalendar.MaxHorizonDays
@@ -43,5 +50,6 @@ RealmCalendar.Enable = 1
 RealmCalendar.OutputFile = "calendar.json"
 RealmCalendar.FutureMonths = 12
 RealmCalendar.CheckIntervalMinutes = 60
+RealmCalendar.Diagnostics = 0
 RealmCalendar.DefaultHorizonDays = 30
 RealmCalendar.MaxHorizonDays = 730
