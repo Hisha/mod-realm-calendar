@@ -4,16 +4,18 @@ A standalone AzerothCore module for exposing the realm's **public in-game calend
 
 This module intentionally does **not** expose player-created calendar events, raid lockouts, guild invitations, or other personal calendar data.
 
-## Current milestone: diagnostic discovery
+## Current milestone: calendar/timezone validation
 
-The first version is deliberately diagnostic. Before publishing JSON, the module needs to prove that it can reproduce the same public event schedule shown by the WoW 3.3.5a calendar.
+The module now builds the public calendar from two server-side sources: seasonal/date-driven holidays come from AzerothCore's in-memory `Holidays.dbc` data, while weekly fishing contests use their `GameEventMgr` recurrence. Call to Arms / `CalendarFilterType 2` entries are excluded from the default public view.
 
-It reads AzerothCore's already-loaded `GameEventMgr` data and treats entries with a non-zero `HolidayId` as calendar-facing public events.
+The current pass also normalizes `game_event` TIMESTAMP anchors back to realm wall-clock time and advances weekly recurrences in local calendar minutes, so a weekly event remains at the same clock time across DST changes.
 
 ### Commands
 
 ```text
+.realmcalendar month 2026 9
 .realmcalendar inspect
+.realmcalendar holidays
 .realmcalendar upcoming
 .realmcalendar upcoming 365
 ```
@@ -29,6 +31,8 @@ It reads AzerothCore's already-loaded `GameEventMgr` data and treats entries wit
 - event length
 - active state
 - description
+
+`month <year> <month>` is the primary regression command. It prints the default public event set in a compact, client-style form. Multi-day holidays are displayed as visible calendar date ranges with an inclusive `23:59` end; timed weekly contests retain their clock times.
 
 `upcoming [days]` calculates event occurrences from the loaded schedule. The default horizon is 30 days; the diagnostic command allows up to 730 days so a full in-game calendar year can be compared.
 

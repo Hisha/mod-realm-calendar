@@ -344,6 +344,40 @@ bool IsDefaultPublicHoliday(HolidaysEntry const& holiday)
     return holiday.CalendarFilterType != 2;
 }
 
+time_t DatabaseTimestampAsRealmWallClock(time_t encodedTimestamp)
+{
+    // game_event.start_time is a MySQL TIMESTAMP. The stock data describes a
+    // realm wall-clock time (for example, the fishing contests are 14:00), but
+    // UNIX_TIMESTAMP() turns that value into an epoch. On a realm whose database
+    // session and OS timezone differ, formatting that epoch with localtime() can
+    // shift the visible clock (14:00 became 10:00 on an EDT realm).
+    //
+    // Recover the wall-clock fields from the encoded timestamp as UTC, then let
+    // mktime() place those fields in the realm's local timezone. This also gives
+    // mktime a chance to apply the correct DST rule for the target date.
+    std::tm wall{};
+#if defined(_WIN32)
+    gmtime_s(&wall, &encodedTimestamp);
+#else
+    gmtime_r(&encodedTimestamp, &wall);
+#endif
+    wall.tm_isdst = -1;
+    return std::mktime(&wall);
+}
+
+time_t AddLocalCalendarMinutes(time_t value, int64 minutes)
+{
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &value);
+#else
+    localtime_r(&value, &local);
+#endif
+    local.tm_min += static_cast<int>(minutes);
+    local.tm_isdst = -1;
+    return std::mktime(&local);
+}
+
 void AppendGameEventRecurrences(HolidaySource const& source, time_t windowStart, time_t windowEnd,
                                 std::vector<CalendarOccurrence>& output)
 {
@@ -351,26 +385,32 @@ void AppendGameEventRecurrences(HolidaySource const& source, time_t windowStart,
     if (eventData.Start <= 0 || eventData.Occurence == 0 || eventData.Length == 0)
         return;
 
-    time_t const period = static_cast<time_t>(eventData.Occurence) * MINUTE;
+    time_t const anchor = DatabaseTimestampAsRealmWallClock(eventData.Start);
     time_t const duration = static_cast<time_t>(eventData.Length) * MINUTE;
-    if (period <= 0 || duration <= 0)
+    if (anchor <= 0 || duration <= 0)
         return;
 
-    int64 occurrenceIndex = 0;
-    if (windowStart > eventData.Start)
-        occurrenceIndex = static_cast<int64>((windowStart - eventData.Start) / period);
-    if (occurrenceIndex > 0)
-        --occurrenceIndex;
+    // Advance in calendar minutes rather than epoch seconds. Weekly events should
+    // remain at the same realm wall-clock time when DST changes. The loop is only
+    // a few hundred iterations for the stock 2016 fishing anchors, which keeps the
+    // logic simple and avoids inheriting the core's known static-anchor DST drift.
+    time_t start = anchor;
+    while (start + duration < windowStart)
+    {
+        time_t const next = AddLocalCalendarMinutes(start, static_cast<int64>(eventData.Occurence));
+        if (next <= start)
+            return;
+        start = next;
+    }
 
     std::string const name = CleanDisplayName(eventData.Description);
-    for (;; ++occurrenceIndex)
+    while (start <= windowEnd)
     {
-        time_t const start = eventData.Start + static_cast<time_t>(occurrenceIndex) * period;
-        if (start > windowEnd)
-            break;
-        if (start + duration < windowStart)
-            continue;
         AppendOccurrence(output, source, name, start, start + duration, windowStart, windowEnd);
+        time_t const next = AddLocalCalendarMinutes(start, static_cast<int64>(eventData.Occurence));
+        if (next <= start)
+            break;
+        start = next;
     }
 }
 
@@ -441,6 +481,46 @@ std::string FormatMonthDayTime(time_t value)
 #endif
     std::ostringstream out;
     out << std::put_time(&tmValue, "%b %d %H:%M");
+    return out.str();
+}
+
+std::string FormatClientStyleOccurrence(CalendarOccurrence const& occurrence)
+{
+    time_t const duration = occurrence.End - occurrence.Start;
+    std::ostringstream out;
+
+    if (duration >= DAY)
+    {
+        // WoW presents these as date-spanning/all-day holidays. The internal end
+        // is exclusive, so show the preceding visible calendar day at 23:59.
+        std::tm startTm{};
+        std::tm endTm{};
+#if defined(_WIN32)
+        localtime_s(&startTm, &occurrence.Start);
+        localtime_s(&endTm, &occurrence.End);
+#else
+        localtime_r(&occurrence.Start, &startTm);
+        localtime_r(&occurrence.End, &endTm);
+#endif
+        endTm.tm_hour = 0;
+        endTm.tm_min = 0;
+        endTm.tm_sec = 0;
+        endTm.tm_mday -= 1;
+        endTm.tm_isdst = -1;
+        time_t const visibleEnd = std::mktime(&endTm);
+#if defined(_WIN32)
+        localtime_s(&endTm, &visibleEnd);
+#else
+        localtime_r(&visibleEnd, &endTm);
+#endif
+        out << std::put_time(&startTm, "%b %d") << " -> "
+            << std::put_time(&endTm, "%b %d") << " 23:59";
+    }
+    else
+    {
+        out << FormatMonthDayTime(occurrence.Start) << " -> " << FormatMonthDayTime(occurrence.End);
+    }
+
     return out.str();
 }
 }
@@ -515,13 +595,9 @@ private:
 
         for (CalendarOccurrence const& occurrence : occurrences)
         {
-            // End is an exclusive boundary. Display it explicitly here while diagnostics
-            // are being compared; consumers can later render midnight as 23:59 on the
-            // preceding visible day just like the WoW calendar UI.
-            handler->PSendSysMessage("{}  {} -> {}  (holiday={} event={})",
+            handler->PSendSysMessage("{}  {}  (holiday={} event={})",
                 occurrence.Name,
-                FormatMonthDayTime(occurrence.Start),
-                FormatMonthDayTime(occurrence.End),
+                FormatClientStyleOccurrence(occurrence),
                 occurrence.HolidayId,
                 occurrence.EventId);
         }
