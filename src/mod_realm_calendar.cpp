@@ -588,8 +588,8 @@ std::string JsonEscape(std::string const& input)
     {
         switch (ch)
         {
-            case '\\': out << "\\\"; break;
-            case '"':  out << "\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '"':  out << "\\\""; break;
             case '\b': out << "\\b"; break;
             case '\f': out << "\\f"; break;
             case '\n': out << "\\n"; break;
