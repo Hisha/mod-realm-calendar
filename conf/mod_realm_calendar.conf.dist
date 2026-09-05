@@ -47,7 +47,7 @@
 ###################################################################################################
 
 RealmCalendar.Enable = 1
-RealmCalendar.OutputFile = "calendar.json"
+RealmCalendar.OutputFile = "/mnt/ai_data/linkable/calendar.json"
 RealmCalendar.FutureMonths = 12
 RealmCalendar.CheckIntervalMinutes = 60
 RealmCalendar.Diagnostics = 0
