@@ -4,12 +4,16 @@
 #include "DBCStores.h"
 #include "GameEventMgr.h"
 #include "HolidayDateCalculator.h"
+#include "Log.h"
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -24,6 +28,9 @@ namespace
 struct RealmCalendarConfig
 {
     bool Enabled = true;
+    std::string OutputFile = "calendar.json";
+    uint32 FutureMonths = 12;
+    uint32 CheckIntervalMinutes = 60;
     uint32 DefaultHorizonDays = 30;
     uint32 MaxHorizonDays = 730;
 };
@@ -33,6 +40,9 @@ RealmCalendarConfig gRealmCalendarConfig;
 void LoadRealmCalendarConfig()
 {
     gRealmCalendarConfig.Enabled = sConfigMgr->GetOption<bool>("RealmCalendar.Enable", true);
+    gRealmCalendarConfig.OutputFile = sConfigMgr->GetOption<std::string>("RealmCalendar.OutputFile", "calendar.json");
+    gRealmCalendarConfig.FutureMonths = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("RealmCalendar.FutureMonths", 12), 1, 36);
+    gRealmCalendarConfig.CheckIntervalMinutes = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("RealmCalendar.CheckIntervalMinutes", 60), 5, 1440);
     gRealmCalendarConfig.DefaultHorizonDays = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("RealmCalendar.DefaultHorizonDays", 30));
     gRealmCalendarConfig.MaxHorizonDays = std::max<uint32>(gRealmCalendarConfig.DefaultHorizonDays,
         sConfigMgr->GetOption<uint32>("RealmCalendar.MaxHorizonDays", 730));
@@ -523,17 +533,299 @@ std::string FormatClientStyleOccurrence(CalendarOccurrence const& occurrence)
 
     return out.str();
 }
+
+std::tm LocalTm(time_t value)
+{
+    std::tm result{};
+#if defined(_WIN32)
+    localtime_s(&result, &value);
+#else
+    localtime_r(&value, &result);
+#endif
+    return result;
+}
+
+std::string FormatDate(time_t value)
+{
+    std::tm local = LocalTm(value);
+    std::ostringstream out;
+    out << std::put_time(&local, "%Y-%m-%d");
+    return out.str();
+}
+
+std::string FormatUtcTimestamp(time_t value)
+{
+    std::tm utc{};
+#if defined(_WIN32)
+    gmtime_s(&utc, &value);
+#else
+    gmtime_r(&value, &utc);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+    return out.str();
+}
+
+std::string FormatLocalIso8601(time_t value)
+{
+    std::tm local = LocalTm(value);
+    std::ostringstream base;
+    base << std::put_time(&local, "%Y-%m-%dT%H:%M:%S");
+
+    char zoneBuffer[16] = {};
+    std::strftime(zoneBuffer, sizeof(zoneBuffer), "%z", &local);
+    std::string zone(zoneBuffer);
+    if (zone.size() == 5 && (zone[0] == '+' || zone[0] == '-'))
+        zone.insert(3, ":");
+
+    return base.str() + zone;
+}
+
+std::string JsonEscape(std::string const& input)
+{
+    std::ostringstream out;
+    for (unsigned char ch : input)
+    {
+        switch (ch)
+        {
+            case '\\': out << "\\\"; break;
+            case '"':  out << "\\""; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (ch < 0x20)
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<uint32>(ch) << std::dec;
+                else
+                    out << static_cast<char>(ch);
+                break;
+        }
+    }
+    return out.str();
+}
+
+time_t AddLocalMonths(time_t value, int months)
+{
+    std::tm local = LocalTm(value);
+    local.tm_mon += months;
+    local.tm_mday = 1;
+    local.tm_hour = 0;
+    local.tm_min = 0;
+    local.tm_sec = 0;
+    local.tm_isdst = -1;
+    return std::mktime(&local);
+}
+
+time_t StartOfCurrentMonth()
+{
+    time_t now = std::time(nullptr);
+    std::tm local = LocalTm(now);
+    return MakeLocalDate(local.tm_year + 1900, local.tm_mon + 1, 1);
+}
+
+uint32 CurrentMonthKey()
+{
+    std::tm local = LocalTm(std::time(nullptr));
+    return static_cast<uint32>((local.tm_year + 1900) * 100 + (local.tm_mon + 1));
+}
+
+time_t VisibleAllDayEnd(CalendarOccurrence const& occurrence)
+{
+    std::tm endLocal = LocalTm(occurrence.End);
+    endLocal.tm_hour = 0;
+    endLocal.tm_min = 0;
+    endLocal.tm_sec = 0;
+    endLocal.tm_mday -= 1;
+    endLocal.tm_isdst = -1;
+    return std::mktime(&endLocal);
+}
+
+bool IsAllDayOccurrence(CalendarOccurrence const& occurrence)
+{
+    return occurrence.End - occurrence.Start >= DAY;
+}
+
+std::string CategoryForHoliday(HolidaysEntry const& holiday)
+{
+    if (holiday.CalendarFilterType == 0 && !holiday.Looping)
+        return "fishing";
+    return "holiday";
+}
+
+bool WriteCalendarJson(std::string const& outputFile, time_t rangeStart, time_t rangeEnd,
+                       std::vector<CalendarOccurrence> const& occurrences)
+{
+    if (outputFile.empty())
+    {
+        LOG_ERROR("module", "[Realm Calendar] RealmCalendar.OutputFile is empty; calendar was not published.");
+        return false;
+    }
+
+    std::filesystem::path const target(outputFile);
+    std::error_code ec;
+    if (target.has_parent_path())
+    {
+        std::filesystem::create_directories(target.parent_path(), ec);
+        if (ec)
+        {
+            LOG_ERROR("module", "[Realm Calendar] Could not create output directory '{}': {}", target.parent_path().string(), ec.message());
+            return false;
+        }
+    }
+
+    std::filesystem::path temp = target;
+    temp += ".tmp";
+
+    std::ofstream out(temp, std::ios::out | std::ios::trunc);
+    if (!out)
+    {
+        LOG_ERROR("module", "[Realm Calendar] Could not open temporary output '{}'.", temp.string());
+        return false;
+    }
+
+    time_t const generatedAt = std::time(nullptr);
+    out << "{\n";
+    out << "  \"schemaVersion\": 1,\n";
+    out << "  \"generatedAt\": \"" << FormatUtcTimestamp(generatedAt) << "\",\n";
+    out << "  \"range\": {\n";
+    out << "    \"start\": \"" << FormatDate(rangeStart) << "\",\n";
+    out << "    \"end\": \"" << FormatDate(rangeEnd - 1) << "\"\n";
+    out << "  },\n";
+    out << "  \"events\": [\n";
+
+    bool first = true;
+    for (CalendarOccurrence const& occurrence : occurrences)
+    {
+        HolidaysEntry const* holiday = sHolidaysStore.LookupEntry(occurrence.HolidayId);
+        if (!holiday)
+            continue;
+
+        if (!first)
+            out << ",\n";
+        first = false;
+
+        bool const allDay = IsAllDayOccurrence(occurrence);
+        out << "    {\n";
+        out << "      \"holidayId\": " << occurrence.HolidayId << ",\n";
+        out << "      \"gameEventId\": " << occurrence.EventId << ",\n";
+        out << "      \"name\": \"" << JsonEscape(occurrence.Name) << "\",\n";
+        out << "      \"category\": \"" << CategoryForHoliday(*holiday) << "\",\n";
+        out << "      \"allDay\": " << (allDay ? "true" : "false") << ",\n";
+        if (allDay)
+        {
+            out << "      \"startDate\": \"" << FormatDate(occurrence.Start) << "\",\n";
+            out << "      \"endDate\": \"" << FormatDate(VisibleAllDayEnd(occurrence)) << "\",\n";
+        }
+        else
+        {
+            out << "      \"start\": \"" << FormatLocalIso8601(occurrence.Start) << "\",\n";
+            out << "      \"end\": \"" << FormatLocalIso8601(occurrence.End) << "\",\n";
+        }
+        out << "      \"texture\": \"" << JsonEscape(holiday->TextureFilename ? holiday->TextureFilename : "") << "\"\n";
+        out << "    }";
+    }
+
+    out << "\n  ]\n";
+    out << "}\n";
+    out.close();
+    if (!out)
+    {
+        LOG_ERROR("module", "[Realm Calendar] Failed while writing temporary output '{}'.", temp.string());
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+
+    // std::rename maps to atomic rename(2) on the Linux servers AzerothCore normally
+    // runs on, so readers never observe a partially-written calendar file.
+    if (std::rename(temp.string().c_str(), target.string().c_str()) != 0)
+    {
+#if defined(_WIN32)
+        // Windows does not replace an existing destination with std::rename.
+        std::filesystem::remove(target, ec);
+        if (std::rename(temp.string().c_str(), target.string().c_str()) == 0)
+            return true;
+#endif
+        LOG_ERROR("module", "[Realm Calendar] Could not replace output file '{}' with '{}'.", target.string(), temp.string());
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+
+    return true;
+}
+
+bool PublishCalendar()
+{
+    if (!gRealmCalendarConfig.Enabled)
+        return false;
+
+    time_t const rangeStart = StartOfCurrentMonth();
+    // FutureMonths=12 means current month plus twelve additional months. On
+    // September 4, 2026 this publishes through September 30, 2027, matching the
+    // practical horizon visible in the 3.3.5a client calendar.
+    time_t const rangeEnd = AddLocalMonths(rangeStart, static_cast<int>(gRealmCalendarConfig.FutureMonths) + 1);
+    std::vector<CalendarOccurrence> const occurrences = BuildOccurrences(rangeStart, rangeEnd - 1);
+
+    if (!WriteCalendarJson(gRealmCalendarConfig.OutputFile, rangeStart, rangeEnd, occurrences))
+        return false;
+
+    LOG_INFO("module", "[Realm Calendar] Published {} public occurrence(s) to '{}' for {} through {}.",
+        occurrences.size(), gRealmCalendarConfig.OutputFile, FormatDate(rangeStart), FormatDate(rangeEnd - 1));
+    return true;
+}
 }
 
 class realm_calendar_configscript : public WorldScript
 {
 public:
-    realm_calendar_configscript() : WorldScript("realm_calendar_configscript", { WORLDHOOK_ON_BEFORE_CONFIG_LOAD }) { }
+    realm_calendar_configscript() : WorldScript("realm_calendar_configscript",
+        { WORLDHOOK_ON_BEFORE_CONFIG_LOAD, WORLDHOOK_ON_AFTER_CONFIG_LOAD, WORLDHOOK_ON_STARTUP, WORLDHOOK_ON_UPDATE }) { }
 
     void OnBeforeConfigLoad(bool /*reload*/) override
     {
         LoadRealmCalendarConfig();
     }
+
+    void OnAfterConfigLoad(bool reload) override
+    {
+        if (reload && gRealmCalendarConfig.Enabled && PublishCalendar())
+            _lastPublishedMonth = CurrentMonthKey();
+    }
+
+    void OnStartup() override
+    {
+        _checkTimerMs = 0;
+        _lastPublishedMonth = 0;
+        if (gRealmCalendarConfig.Enabled && PublishCalendar())
+            _lastPublishedMonth = CurrentMonthKey();
+    }
+
+    void OnUpdate(uint32 diff) override
+    {
+        if (!gRealmCalendarConfig.Enabled)
+            return;
+
+        _checkTimerMs += diff;
+        uint64 const intervalMs = static_cast<uint64>(gRealmCalendarConfig.CheckIntervalMinutes) * 60ULL * 1000ULL;
+        if (_checkTimerMs < intervalMs)
+            return;
+        _checkTimerMs = 0;
+
+        uint32 const monthKey = CurrentMonthKey();
+        std::error_code existsError;
+        bool const outputExists = !gRealmCalendarConfig.OutputFile.empty() &&
+            std::filesystem::exists(std::filesystem::path(gRealmCalendarConfig.OutputFile), existsError) && !existsError;
+        if (_lastPublishedMonth == monthKey && outputExists)
+            return;
+
+        if (PublishCalendar())
+            _lastPublishedMonth = monthKey;
+    }
+
+private:
+    uint64 _checkTimerMs = 0;
+    uint32 _lastPublishedMonth = 0;
 };
 
 class realm_calendar_commandscript : public CommandScript
@@ -545,6 +837,7 @@ public:
     {
         static ChatCommandTable realmCalendarCommandTable =
         {
+            { "publish",  HandlePublishCommand,  SEC_ADMINISTRATOR, Console::Yes },
             { "month",    HandleMonthCommand,    SEC_ADMINISTRATOR, Console::Yes },
             { "upcoming", HandleUpcomingCommand, SEC_ADMINISTRATOR, Console::Yes },
             { "holidays", HandleHolidaysCommand, SEC_ADMINISTRATOR, Console::Yes },
@@ -560,6 +853,21 @@ public:
     }
 
 private:
+    static bool HandlePublishCommand(ChatHandler* handler)
+    {
+        if (!gRealmCalendarConfig.Enabled)
+        {
+            handler->SendSysMessage("[Realm Calendar] Module is disabled in mod_realm_calendar.conf.");
+            return true;
+        }
+
+        if (PublishCalendar())
+            handler->PSendSysMessage("[Realm Calendar] Published rolling calendar to '{}'.", gRealmCalendarConfig.OutputFile);
+        else
+            handler->SendSysMessage("[Realm Calendar] Calendar publication failed; check worldserver log for details.");
+        return true;
+    }
+
     static bool HandleMonthCommand(ChatHandler* handler, uint32 year, uint32 month)
     {
         if (!gRealmCalendarConfig.Enabled)

@@ -1,14 +1,33 @@
 #
 #    mod-realm-calendar
-#    AzerothCore realm/public calendar event exporter
+#    AzerothCore realm/public calendar publisher
 #
 
 ###################################################################################################
 # REALM CALENDAR
 #
 #    RealmCalendar.Enable
-#        Description: Enables mod-realm-calendar diagnostics and future calendar export features.
+#        Description: Enables automatic realm calendar publication and diagnostic commands.
 #        Default:     1
+#
+#    RealmCalendar.OutputFile
+#        Description: JSON file maintained by the module. Relative paths are resolved from the
+#                     worldserver working directory. An absolute web-root path is recommended when
+#                     nginx/Apache will serve the feed. Parent directories are created as needed.
+#        Default:     "calendar.json"
+#
+#    RealmCalendar.FutureMonths
+#        Description: Number of additional calendar months published after the current month.
+#                     12 means the current month plus 12 future months. For example, on Sep 4 2026
+#                     the feed covers Sep 1 2026 through Sep 30 2027.
+#        Range:       1-36
+#        Default:     12
+#
+#    RealmCalendar.CheckIntervalMinutes
+#        Description: How often the module checks whether a new month has started. Publication also
+#                     occurs immediately on worldserver startup and after a config reload.
+#        Range:       5-1440
+#        Default:     60
 #
 #    RealmCalendar.DefaultHorizonDays
 #        Description: Number of days shown by `.realmcalendar upcoming` when no value is supplied.
@@ -16,11 +35,13 @@
 #
 #    RealmCalendar.MaxHorizonDays
 #        Description: Maximum value accepted by `.realmcalendar upcoming <days>`.
-#                     730 allows testing well beyond the in-game rolling calendar horizon.
 #        Default:     730
 #
 ###################################################################################################
 
 RealmCalendar.Enable = 1
+RealmCalendar.OutputFile = "calendar.json"
+RealmCalendar.FutureMonths = 12
+RealmCalendar.CheckIntervalMinutes = 60
 RealmCalendar.DefaultHorizonDays = 30
 RealmCalendar.MaxHorizonDays = 730

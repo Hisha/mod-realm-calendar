@@ -1,124 +1,105 @@
 # mod-realm-calendar
 
-A standalone AzerothCore module for exposing the realm's **public in-game calendar events** to external consumers such as launchers and websites.
+A standalone AzerothCore module that maintains a machine-readable JSON feed of the realm's **public in-game calendar events** for launchers, websites, and other external consumers.
 
-This module intentionally does **not** expose player-created calendar events, raid lockouts, guild invitations, or other personal calendar data.
+The module intentionally excludes player-created calendar events, raid lockouts, guild invitations, character reminders, and other personal calendar data. Editorial/admin news belongs in a separate realm-news project.
 
-## Current milestone: calendar/timezone validation
+## Automatic rolling publication
 
-The module now builds the public calendar from two server-side sources: seasonal/date-driven holidays come from AzerothCore's in-memory `Holidays.dbc` data, while weekly fishing contests use their `GameEventMgr` recurrence. Call to Arms / `CalendarFilterType 2` entries are excluded from the default public view.
+Normal operation requires no GM command and no cron job. When enabled, the module:
 
-The current pass also normalizes `game_event` TIMESTAMP anchors back to realm wall-clock time and advances weekly recurrences in local calendar minutes, so a weekly event remains at the same clock time across DST changes.
+- publishes `calendar.json` automatically when `worldserver` starts;
+- checks periodically for a month rollover;
+- regenerates when a new month begins, dropping the expired month and adding another month at the far end;
+- republishes after a configuration reload;
+- writes to a temporary file and replaces the public JSON only after the new file is complete.
 
-### Commands
+`RealmCalendar.FutureMonths = 12` means **the current month plus twelve additional months**. This matches the observed 3.3.5a calendar horizon: on September 4, 2026 the published range is September 1, 2026 through September 30, 2027. On October 1 it becomes October 1, 2026 through October 31, 2027.
 
-```text
-.realmcalendar month 2026 9
-.realmcalendar inspect
-.realmcalendar holidays
-.realmcalendar upcoming
-.realmcalendar upcoming 365
-```
+If the server is offline at midnight on the first, nothing special is required: the next startup immediately publishes the correct new rolling range.
 
-`inspect` displays the raw calendar-facing `GameEventMgr` definitions that AzerothCore loaded, including:
+## Calendar sources
 
-- game event ID
-- holiday ID
-- holiday stage
-- game-event state
-- calculated start and absolute end
-- recurrence interval
-- event length
-- active state
-- description
+The public schedule is built from the same data AzerothCore uses:
 
-`month <year> <month>` is the primary regression command. It prints the default public event set in a compact, client-style form. Multi-day holidays are displayed as visible calendar date ranges with an inclusive `23:59` end; timed weekly contests retain their clock times.
+- seasonal/date-driven holidays use the in-memory `Holidays.dbc` definitions after AzerothCore has populated their dynamic dates;
+- weekly fishing contests use their `GameEventMgr` recurrence for timing while retaining their holiday identity;
+- weekly recurrence is advanced in realm wall-clock time so 14:00 events remain at 14:00 across DST transitions;
+- Call to Arms / `CalendarFilterType 2` events are excluded from the default public feed.
 
-`upcoming [days]` calculates event occurrences from the loaded schedule. The default horizon is 30 days; the diagnostic command allows up to 730 days so a full in-game calendar year can be compared.
-
-## Why this module reads GameEventMgr
-
-The goal is to stay aligned with the same server-side event schedule AzerothCore uses rather than maintaining a second hand-written holiday calendar. AzerothCore exposes `GetEventMap()` and `GetActiveEventList()` through `GameEventMgr`, and its loaded `GameEventData` includes recurrence, length, holiday ID, stage, and description.
-
-This first pass is intentionally not the final exporter. If the diagnostic output differs from the dates/times visible in the client calendar, the next step is to trace AzerothCore's dynamically populated `Holidays.dbc` data and make the exporter consume the exact calendar-facing representation.
-
-## Initial acceptance test
-
-September 2026 is the first regression month. Compare the command output against the actual client calendar for events such as:
-
-- Darkmoon Faire
-- Kalu'ak Fishing Derby
-- Stranglethorn Fishing Extravaganza
-- Pirates' Day
-- Brewfest
-- Harvest Festival
-
-The dates **and times** should agree with the game before JSON publication is implemented.
+The September 2026 regression set was verified against the WoW 3.3.5a client for Darkmoon Faire, Kalu'ak Fishing Derby, Stranglethorn Fishing Extravaganza, Pirates' Day, Brewfest, and Harvest Festival.
 
 ## Configuration
 
-AzerothCore installs the module configuration from:
-
-```text
-conf/mod_realm_calendar.conf.dist
-```
-
-On install, the normal AzerothCore module-config process creates/uses `mod_realm_calendar.conf` under the server module config directory. Current options are:
+AzerothCore installs `conf/mod_realm_calendar.conf.dist` through the normal module configuration process.
 
 ```ini
 RealmCalendar.Enable = 1
+RealmCalendar.OutputFile = "calendar.json"
+RealmCalendar.FutureMonths = 12
+RealmCalendar.CheckIntervalMinutes = 60
 RealmCalendar.DefaultHorizonDays = 30
 RealmCalendar.MaxHorizonDays = 730
 ```
 
-The horizon settings control the diagnostic `upcoming` command now and will also provide the basis for the later JSON export horizon.
+For a web-served feed, set `RealmCalendar.OutputFile` to an absolute path writable by the worldserver service account, for example a directory exposed by nginx or Apache. Parent directories are created automatically when possible.
+
+## JSON schema
+
+The generated document uses `schemaVersion: 1` and records when it was generated, its inclusive date range, and the public events. Multi-day holidays are represented as date-only/all-day events; contests preserve explicit timestamps with the realm's UTC offset.
+
+Example shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-05T02:00:00Z",
+  "range": {
+    "start": "2026-09-01",
+    "end": "2027-09-30"
+  },
+  "events": [
+    {
+      "holidayId": 424,
+      "gameEventId": 64,
+      "name": "Kalu'ak Fishing Derby",
+      "category": "fishing",
+      "allDay": false,
+      "start": "2026-09-12T14:00:00-0400",
+      "end": "2026-09-12T15:00:00-0400",
+      "texture": "Calendar_FishingExtravaganza"
+    }
+  ]
+}
+```
+
+## Diagnostic/admin commands
+
+These commands are not required for normal publication:
+
+- `.realmcalendar publish` — force an immediate JSON regeneration.
+- `.realmcalendar month <year> <month>` — compact client-style month view for regression testing.
+- `.realmcalendar upcoming [days]` — calculated public occurrences in a future window.
+- `.realmcalendar holidays` — logical `Holidays.dbc` definitions and stages.
+- `.realmcalendar inspect` — raw calendar-facing `GameEventMgr` rows.
 
 ## Installation
 
-Clone or copy the repository under the AzerothCore `modules` directory, rerun CMake, rebuild, and install as usual.
-
-Example:
+Place the repository under AzerothCore's `modules` directory, rerun CMake, rebuild/install, configure the output path, and restart `worldserver`.
 
 ```bash
-git clone <repository-url> ~/azerothcore-wotlk/modules/mod-realm-calendar
 cd ~/azerothcore-wotlk/build
 cmake ..
 make -j"$(nproc)"
 make install
 ```
 
-Then restart `worldserver` and test with:
-
-```text
-.realmcalendar inspect
-.realmcalendar upcoming 30
-.realmcalendar upcoming 365
-```
-
-## Planned next milestones
-
-Once the diagnostic output matches the in-game calendar:
-
-1. Define a stable `calendar.json` schema.
-2. Export approximately 12 months of public realm events by default.
-3. Preserve exact event start/end timestamps where the game exposes them.
-4. Publish the JSON atomically to a configurable filesystem location for nginx/Apache or another static web server.
-5. Keep the module consumer-neutral: Portalkeeper, websites, and other launchers can all consume the same feed.
+After startup, check the worldserver log for a `[Realm Calendar] Published ...` line and inspect the configured JSON file.
 
 ## Scope
 
-`mod-realm-calendar` is for **realm/public events only**. Editorial server announcements and administrator news belong in a separate realm-news module.
+`mod-realm-calendar` publishes realm/public calendar events only and stays consumer-neutral: Portalkeeper, a website, or another launcher can all consume the same feed.
 
 ## License
 
 GPL-2.0-or-later, matching AzerothCore's licensing model.
-
-
-## Diagnostic commands
-
-- `.realmcalendar inspect` — raw calendar-facing `GameEventMgr` rows with canonical event IDs taken from the event-map index.
-- `.realmcalendar holidays` — logical holiday definitions from the in-memory `Holidays.dbc` store, including stages, packed dates, filter type, looping flag, and texture.
-- `.realmcalendar upcoming [days]` — logical public occurrences; seasonal holidays use Holidays.dbc while weekly fishing contests use the GameEventMgr recurrence.
-- `.realmcalendar month <year> <month>` — compact month view for direct comparison with the in-game calendar. Call to Arms / CalendarFilterType 2 events are excluded from the default public view.
-
-The current development target is to make `upcoming` agree with the public events shown by the WoW 3.3.5a calendar before adding JSON export.
